@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 
 namespace Colorgram;
 
@@ -67,24 +68,52 @@ public readonly struct ColorHistogram
     /// <summary>Builds a histogram, optionally skipping near-white and near-black pixels.</summary>
     public static ColorHistogram Create(ReadOnlySpan<Rgb24> pixels, bool ignoreWhite, bool ignoreBlack)
     {
+        ColorBucket[] buckets = Build(pixels, ignoreWhite, ignoreBlack, pooled: false, out _, out long totalCount);
+        return new ColorHistogram(buckets, totalCount);
+    }
+
+    // The caller owns the rented buckets and must return them after consuming the populated prefix.
+    internal static ColorBucket[] Build(
+        ReadOnlySpan<Rgb24> pixels, bool ignoreWhite, bool ignoreBlack, bool pooled,
+        out int bucketCount, out long totalCount)
+    {
+        bucketCount = 0;
+        totalCount = 0;
+        if (pixels.IsEmpty)
+        {
+            return Array.Empty<ColorBucket>();
+        }
+
         int[] counts = ArrayPool<int>.Shared.Rent(Rgb5.BucketCount);
         try
         {
             Array.Clear(counts, 0, Rgb5.BucketCount);
 
-            long totalCount = 0;
-            foreach (Rgb24 pixel in pixels)
+            long counted = 0;
+            if (!ignoreWhite && !ignoreBlack)
             {
-                if (ShouldIgnore(pixel, ignoreWhite, ignoreBlack))
+                foreach (Rgb24 pixel in pixels)
                 {
-                    continue;
+                    counts[Rgb5.FromRgb24(pixel).Packed]++;
                 }
+                counted = pixels.Length;
+            }
+            else
+            {
+                foreach (Rgb24 pixel in pixels)
+                {
+                    if (ShouldIgnore(pixel, ignoreWhite, ignoreBlack))
+                    {
+                        continue;
+                    }
 
-                counts[Rgb5.FromRgb24(pixel).Packed]++;
-                totalCount++;
+                    counts[Rgb5.FromRgb24(pixel).Packed]++;
+                    counted++;
+                }
             }
 
-            return Finish(counts, totalCount);
+            totalCount = counted;
+            return Finish(counts, totalCount, pooled, out bucketCount);
         }
         finally
         {
@@ -110,38 +139,20 @@ public readonly struct ColorHistogram
             throw new ArgumentException("RGB data must contain complete three-byte pixels.", nameof(rgb));
         }
 
-        int[] counts = ArrayPool<int>.Shared.Rent(Rgb5.BucketCount);
-        try
-        {
-            Array.Clear(counts, 0, Rgb5.BucketCount);
-
-            long totalCount = 0;
-            for (int i = 0; i < rgb.Length; i += 3)
-            {
-                var pixel = new Rgb24(rgb[i], rgb[i + 1], rgb[i + 2]);
-                if (ShouldIgnore(pixel, ignoreWhite, ignoreBlack))
-                {
-                    continue;
-                }
-
-                counts[Rgb5.FromRgb24(pixel).Packed]++;
-                totalCount++;
-            }
-
-            return Finish(counts, totalCount);
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(counts);
-        }
+        return Create(MemoryMarshal.Cast<byte, Rgb24>(rgb), ignoreWhite, ignoreBlack);
     }
 
     private static bool ShouldIgnore(Rgb24 pixel, bool ignoreWhite, bool ignoreBlack)
         => (ignoreWhite && pixel.IsNearWhite()) || (ignoreBlack && pixel.IsNearBlack());
 
-    private static ColorHistogram Finish(int[] counts, long totalCount)
+    private static ColorBucket[] Finish(int[] counts, long totalCount, bool pooled, out int distinctCount)
     {
-        int distinctCount = 0;
+        distinctCount = 0;
+        if (totalCount == 0)
+        {
+            return Array.Empty<ColorBucket>();
+        }
+
         for (int i = 0; i < Rgb5.BucketCount; i++)
         {
             if (counts[i] != 0)
@@ -150,12 +161,7 @@ public readonly struct ColorHistogram
             }
         }
 
-        if (distinctCount == 0)
-        {
-            return new ColorHistogram(Array.Empty<ColorBucket>(), 0);
-        }
-
-        var buckets = new ColorBucket[distinctCount];
+        var buckets = pooled ? ArrayPool<ColorBucket>.Shared.Rent(distinctCount) : new ColorBucket[distinctCount];
         int index = 0;
         for (int i = 0; i < Rgb5.BucketCount; i++)
         {
@@ -166,6 +172,6 @@ public readonly struct ColorHistogram
             }
         }
 
-        return new ColorHistogram(buckets, totalCount);
+        return buckets;
     }
 }

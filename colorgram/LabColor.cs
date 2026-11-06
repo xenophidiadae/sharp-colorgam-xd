@@ -19,6 +19,8 @@ public readonly struct LabColor : IEquatable<LabColor>
     // 25^7, used by the CIEDE2000 chroma correction.
     private const double Pow25To7 = 6103515625.0;
 
+    private static readonly double[] SrgbToLinear = CreateSrgbToLinear();
+
     public LabColor(float l, float a, float b)
     {
         L = l;
@@ -199,9 +201,18 @@ public readonly struct LabColor : IEquatable<LabColor>
             $"Lab({L:0.###}, {A:0.###}, {B:0.###})");
 
     private static double Decode(byte value)
+        => SrgbToLinear[value];
+
+    private static double[] CreateSrgbToLinear()
     {
-        double c = value / 255.0;
-        return c <= 0.04045 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        var table = new double[256];
+        for (int i = 0; i < table.Length; i++)
+        {
+            double c = i / 255.0;
+            table[i] = c <= 0.04045 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        return table;
     }
 
     private static byte Encode(double value)
